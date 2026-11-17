@@ -82,6 +82,7 @@ import type { RunnerToolCall } from "../drivers/runner-tool-bridge.js";
 import {
   acpxBootstrapBlockedError,
   acpxSidecarErrorCode,
+  acpxSidecarErrorDetail,
   enqueueAcpxSidecarInput,
   recordAcpxBootstrapFailure,
 } from "./acpx-sidecar-input.js";
@@ -237,12 +238,17 @@ async function receiveLine(line: string): Promise<void> {
       request.command,
       normalized,
     );
+    // Redact the whole agent detail before bounding it; a cut secret is no
+    // longer recognizable. runnerd redacts and shortens it again.
+    const detail = acpxSidecarErrorDetail(normalized);
     response(request.id, false, undefined, {
       code: safeCode(
         acpxSidecarErrorCode(normalized),
         "acpx_sidecar_command_failed",
       ),
-      message: safeMessage(normalized),
+      message: detail === undefined
+        ? safeMessage(normalized)
+        : `${safeMessage(normalized)}: ${safeText(detail, 64 * 1024)}`,
       retryable: normalizedRecord.retryable === true,
     });
   }

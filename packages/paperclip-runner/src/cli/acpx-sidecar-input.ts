@@ -31,6 +31,38 @@ export function acpxBootstrapBlockedError(
 }
 
 /**
+ * The agent's own explanation of an ACP JSON-RPC error. claude-agent-acp, for
+ * example, rejects session/new with "Internal error" and the cause in
+ * `data.details`. Only plain strings are forwarded; structured `data` can carry
+ * credentials under quoted keys that text redaction does not recognize. The
+ * caller must redact the result before it leaves the sidecar.
+ */
+export function acpxSidecarErrorDetail(error: Error): string | undefined {
+  const pending: Error[] = [error];
+  const observed = new Set<Error>();
+  while (pending.length > 0 && observed.size < 16) {
+    const current = pending.shift()!;
+    if (observed.has(current)) continue;
+    observed.add(current);
+    const data = (current as Error & { data?: unknown }).data;
+    const detail = typeof data === "string"
+      ? data
+      : typeof data === "object" && data !== null && typeof (data as Record<string, unknown>).details === "string"
+        ? (data as Record<string, string>).details
+        : undefined;
+    if (detail?.trim()) return detail.trim();
+    if (current instanceof AggregateError) {
+      for (const nested of current.errors) {
+        if (nested instanceof Error) pending.push(nested);
+      }
+    }
+    const cause = (current as Error & { cause?: unknown }).cause;
+    if (cause instanceof Error) pending.push(cause);
+  }
+  return undefined;
+}
+
+/**
  * Preserve only stable ACPX/provider error identities across the sidecar
  * boundary. Startup stderr can contain credentials or provider output, so it
  * contributes a closed category and is never copied into the code itself.

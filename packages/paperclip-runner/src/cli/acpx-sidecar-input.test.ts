@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   acpxBootstrapBlockedError,
   acpxSidecarErrorCode,
+  acpxSidecarErrorDetail,
   enqueueAcpxSidecarInput,
   recordAcpxBootstrapFailure,
 } from "./acpx-sidecar-input.js";
@@ -191,4 +192,15 @@ it("preserves a missing runtime package category across wrapped bootstrap errors
   const error = Object.assign(new Error("private resolver stack"), { code: "ACPX_RUNTIME_PACKAGE_MISSING" });
   expect(acpxSidecarErrorCode(new Error("bootstrap failed", { cause: error }))).toBe("ACPX_RUNTIME_PACKAGE_MISSING");
   expect(acpxSidecarErrorCode(acpxBootstrapBlockedError(error, "session.read")!)).toBe("ACPX_RUNTIME_PACKAGE_MISSING");
+});
+
+it("forwards only a plain-string ACP error detail, including through wrappers", () => {
+  const acp = (data: unknown) => Object.assign(new Error("Internal error"), { code: -32603, data });
+  expect(acpxSidecarErrorDetail(acp({ details: " Unable to validate model " }))).toBe("Unable to validate model");
+  expect(acpxSidecarErrorDetail(acp("quota exceeded"))).toBe("quota exceeded");
+  expect(acpxSidecarErrorDetail(new Error("wrapped", { cause: acp({ details: "nested" }) }))).toBe("nested");
+  expect(acpxSidecarErrorDetail(new AggregateError([acp({ details: "aggregate" })], "cleanup failed"))).toBe("aggregate");
+  for (const data of [undefined, null, 7, "  ", { details: 1 }, { apiKey: "AIzaSyPrivate", headers: { "x-goog-api-key": "private" } }]) {
+    expect(acpxSidecarErrorDetail(acp(data))).toBeUndefined();
+  }
 });
