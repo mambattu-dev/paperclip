@@ -6368,6 +6368,16 @@ export function nativeSessionRecoveryProjection(input: {
   };
 }
 
+// runnerd appends the sidecar's free text after this delimiter
+// (SIDECAR_REJECTION_DETAIL_DELIMITER in acpx_sidecar_transport.rs). Provider
+// text must never select a failure class, so classify only what precedes it.
+const SIDECAR_REJECTION_DETAIL_DELIMITER = " | sidecar detail: ";
+
+function withoutSidecarRejectionDetail(message: string): string {
+  const index = message.indexOf(SIDECAR_REJECTION_DETAIL_DELIMITER);
+  return index === -1 ? message : message.slice(0, index);
+}
+
 export function nativeSessionFailureSourceCode(
   error: unknown,
 ):
@@ -6414,7 +6424,9 @@ export function nativeSessionFailureSourceCode(
     return "native_event_replay_conflict";
   if (error instanceof NativeSessionCleanupQuarantinedError)
     return "native_session_cleanup_quarantined";
-  const message = error instanceof Error ? error.message : String(error);
+  const message = withoutSidecarRejectionDetail(
+    error instanceof Error ? error.message : String(error),
+  );
   if (/classification=runtime_package_missing\)/.test(message))
     return "native_provider_runtime_missing";
   if (/native_provider_model_rejected/i.test(message))

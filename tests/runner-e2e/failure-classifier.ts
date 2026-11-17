@@ -20,10 +20,21 @@ const CANDIDATE =
 const SANDBOX_TRANSFER_TIMEOUT =
   /RPC call "environmentSync(?:In|Out)" timed out after \d+ms/i;
 
+// runnerd appends the sidecar's free text after this delimiter
+// (SIDECAR_REJECTION_DETAIL_DELIMITER in acpx_sidecar_transport.rs). Provider
+// text must never select a failure class, so classify only what precedes it.
+const SIDECAR_REJECTION_DETAIL_DELIMITER = " | sidecar detail: ";
+
+function withoutSidecarRejectionDetail(message: string): string {
+  const index = message.indexOf(SIDECAR_REJECTION_DETAIL_DELIMITER);
+  return index === -1 ? message : message.slice(0, index);
+}
+
 export function classifyFailure(error: unknown): FailureClass {
   if (error instanceof ObservedStateTimeout || error instanceof RemoteAdmissionReadError) return error.failureClass;
-  const message =
-    error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  const message = withoutSidecarRejectionDetail(
+    error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+  );
   if (/browser bootstrap failed before task creation/i.test(message))
     return "transient_infrastructure";
   if (/secret.*(?:leak|plaintext|redaction)/i.test(message))

@@ -502,12 +502,7 @@ impl AcpxSidecarTransport {
                     }
                     let error = response.error.expect("failed response has validated error");
                     return Ok(CommandOutcome::Rejected(LocalRunnerError::invalid(
-                        format!(
-                            "ACPX sidecar command {} was rejected (retryable={}, classification={})",
-                            command.as_str(),
-                            error.retryable,
-                            response_error_classification(&error),
-                        ),
+                        rejected_command_message(command.as_str(), &error),
                     )));
                 }
             }
@@ -832,6 +827,37 @@ fn nullable_identifier(
         )));
     }
     Ok(Some(value.to_owned()))
+}
+
+const REJECTED_DETAIL_MAX_CHARS: usize = 1_000;
+/// Separates the runner-generated rejection fields from the sidecar's free
+/// text. Classifiers must match only the text before it (see the server's
+/// native-session-executor and tests/runner-e2e/failure-classifier.ts).
+pub const SIDECAR_REJECTION_DETAIL_DELIMITER: &str = " | sidecar detail: ";
+
+/// Names the sidecar's error so the run failure shows its cause. The message
+/// is persisted and shown to operators, so it is redacted whole and only then
+/// bounded on a character boundary.
+fn rejected_command_message(command: &str, error: &ResponseError) -> String {
+    let mut message = format!(
+        "ACPX sidecar command {command} was rejected (code={}, retryable={}, classification={})",
+        error.code,
+        error.retryable,
+        response_error_classification(error),
+    );
+    let redacted = crate::durable::redact_diagnostic_text(&error.message);
+    let detail = redacted.trim();
+    if !detail.is_empty() {
+        message.push_str(SIDECAR_REJECTION_DETAIL_DELIMITER);
+        match detail.char_indices().nth(REJECTED_DETAIL_MAX_CHARS) {
+            Some((boundary, _)) => {
+                message.push_str(&detail[..boundary]);
+                message.push('…');
+            }
+            None => message.push_str(detail),
+        }
+    }
+    message
 }
 
 fn redact_diagnostic(value: &str) -> String {
@@ -1231,5 +1257,37 @@ mod tests {
             response_error_classification(&error("VIOLET_CIRCUIT", "violet-circuit-4821")),
             "unclassified"
         );
+    }
+
+    #[test]
+    fn rejected_command_message_names_the_redacted_bounded_cause() {
+        let error = |code: &str, message: &str| ResponseError {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            retryable: false,
+        };
+        let message = rejected_command_message(
+            "session.open",
+            &error(
+                "ACPX_SESSION_ENSURE_FAILED",
+                "Internal error: Unable to validate model (sk-ant-oat01-Ab, sk-0123456789abcdefXYZ, Bearer violet.circuit.4821)",
+            ),
+        );
+        assert!(message.starts_with(
+            "ACPX sidecar command session.open was rejected (code=ACPX_SESSION_ENSURE_FAILED, retryable=false, classification=session_ensure_failed) | sidecar detail: Internal error: Unable to validate model"
+        ));
+        for secret in ["oat01-Ab", "0123456789abcdefXYZ", "violet.circuit.4821"] {
+            assert!(!message.contains(secret), "{message}");
+        }
+        assert!(!rejected_command_message("initialize", &error("X", "  "))
+            .contains(SIDECAR_REJECTION_DETAIL_DELIMITER));
+        let long = rejected_command_message("initialize", &error("X", &"é".repeat(1_500)));
+        assert!(long.ends_with(&format!("{}…", "é".repeat(1_000))));
+        // Ordinary identifiers that merely contain "sk-" survive.
+        assert!(rejected_command_message(
+            "initialize",
+            &error("X", "task-0f3c2a91-7b2e-4c1d-9a8e not found")
+        )
+        .ends_with("task-0f3c2a91-7b2e-4c1d-9a8e not found"));
     }
 }

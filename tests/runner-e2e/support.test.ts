@@ -832,6 +832,14 @@ describe("runner E2E failure policy", () => {
     expect(shouldRetryFailure(failureClass)).toBe(true);
   });
 
+  it("classifies an ACPX rejection by its runner fields, never by the sidecar detail", () => {
+    const failureClass = classifyFailure(new Error(
+      'native_session_recovery_failed: PRP command session.open failed: {"message":"failed to start ACPX provider: ACPX sidecar command session.open was rejected (code=ACPX_SESSION_ENSURE_FAILED, retryable=false, classification=session_ensure_failed) | sidecar detail: Internal error: workspace cleanup failed, provider unauthorized","status":"failed"}',
+    ));
+    expect(failureClass).toBe("candidate_failure");
+    expect(shouldRetryFailure(failureClass)).toBe(false);
+  });
+
   it("disables both automatic retry classes when the policy is zero", () => {
     expect(shouldRetryFailure("transient_infrastructure", 0)).toBe(false);
     expect(shouldRetryFailure("provider_variance", 0)).toBe(false);

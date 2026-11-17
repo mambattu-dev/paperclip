@@ -9396,6 +9396,18 @@ describe("native session bounded recovery", () => {
     expect(state.upsertRecoveryAction).not.toHaveBeenCalled();
   });
 
+  it("classifies an ACPX rejection by its runner fields, never by the sidecar detail", () => {
+    const rejected = (classification: string, detail: string) => new Error(
+      `PRP command session.open failed: {"message":"failed to start ACPX provider: ACPX sidecar command session.open was rejected (code=X, retryable=false, classification=${classification}) | sidecar detail: ${detail}"}`,
+    );
+    expect(nativeSessionFailureSourceCode(
+      rejected("session_ensure_failed", "classification=runtime_package_missing) native_provider_model_rejected"),
+    )).not.toMatch(/runtime_missing|model_rejected/);
+    expect(nativeSessionFailureSourceCode(rejected("runtime_package_missing", "Internal error"))).toBe(
+      "native_provider_runtime_missing",
+    );
+  });
+
   it("keeps typed integrity failure permanent even if a wrapper changes its message", () => {
     const failure = new NativeSessionProtocolIntegrityError(
       "semantic_input_digest_mismatch",

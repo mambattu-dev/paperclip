@@ -2274,6 +2274,8 @@ pub(crate) fn redact_sensitive_text_values(input: &str) -> String {
     // discriminators are never mistaken for credentials in durable state.
     for (prefix, minimum_suffix_length) in [
         ("sk-", 12),
+        // Anthropic keys and OAuth tokens: the prefix alone identifies them.
+        ("sk-ant-", 1),
         ("ghp_", 20),
         ("gho_", 20),
         ("ghu_", 20),
