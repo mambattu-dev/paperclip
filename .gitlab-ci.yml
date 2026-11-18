@@ -1,14 +1,49 @@
-# Hearth build of this fork: registry.hearth.internal/hearth/paperclip:<version>.
-# Runs for release tags only, hearth/v<upstream-version>-hearth.N (see Hearth's
-# FORK.md); hearth/infra deploys that version. Upstream's production stage, then
-# hearth/uid.Dockerfile (runs as srv 997:984).
+# Hearth pipelines for this fork (see Hearth's FORK.md).
+#   hearth/v<upstream>-hearth.N tag -> release image registry.hearth.internal/hearth/paperclip:<version>
+#   schedule (SYNC=upstream)        -> only when upstream publishes a newer stable release
+#                                      (vYYYY.MMDD.N): rebase hearth onto it as sync/<tag>
+#                                      and open a merge request
+#   merge request from sync/*       -> test build; manual promote moves hearth to the
+#                                      rebased branch and tags hearth/<tag>-hearth.0
+# SYNC_TOKEN: project access token (Maintainer; api, write_repository), protected + masked.
 workflow:
   rules:
     - if: $CI_COMMIT_TAG =~ /^hearth\/v.+-hearth\.[0-9]+$/
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $SYNC == "upstream"
+    - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME =~ /^sync\//
 
-build:
+variables:
+  UPSTREAM: https://github.com/paperclipai/paperclip.git
+  STABLE: '^v[0-9]{4}\.[0-9]{3,4}\.[0-9]+$'
+
+.docker:
   image: docker:29.8.2-cli
   tags: [docker, hearth]
+
+.git:
+  image: alpine:3.20
+  tags: [ci]
+  variables:
+    GIT_DEPTH: "0"
+  before_script:
+    - ': "${SYNC_TOKEN:?set SYNC_TOKEN (project access token) as a protected, masked CI variable}"'
+    - apk add --no-cache -q git curl jq
+    - '[ -z "${CI_SERVER_TLS_CA_FILE:-}" ] || export GIT_SSL_CAINFO="$CI_SERVER_TLS_CA_FILE" CURL_CA_BUNDLE="$CI_SERVER_TLS_CA_FILE"'
+    - git config --global user.name "Hearth sync"
+    - git config --global user.email "srv@localhost"
+    - git config --global credential.helper '!f(){ echo username=sync; echo "password=$SYNC_TOKEN"; }; f'
+    - git remote set-url origin "$CI_PROJECT_URL.git"
+    - git remote add upstream "$UPSTREAM"
+    - git fetch -q --no-tags upstream '+refs/tags/v*:refs/tags/v*'
+    - git fetch -q origin '+refs/heads/hearth:refs/remotes/origin/hearth'
+    - API="$CI_API_V4_URL/projects/$CI_PROJECT_ID"
+    # newest stable upstream release that a commit is built on
+    - base_of() { for t in $(git tag -l 'v*' | grep -E "$STABLE" | sort -rV); do git merge-base --is-ancestor "$t" "$1" && { echo "$t"; return; }; done; }
+
+build:
+  extends: .docker
+  rules:
+    - if: $CI_COMMIT_TAG
   script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
     - BASE="$CI_REGISTRY_IMAGE/upstream:$CI_COMMIT_SHORT_SHA"
@@ -24,3 +59,63 @@ build:
       -t "$IMG" hearth
     - docker push -q "$IMG"
     - docker image rm "$BASE" >/dev/null
+
+upstream-sync:
+  extends: .git
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    - OLD=$(base_of origin/hearth)
+    - NEW=$(git tag -l 'v*' | grep -E "$STABLE" | sort -V | tail -1)
+    - echo "hearth is on $OLD; newest upstream release is $NEW"
+    - '[ "$OLD" != "$NEW" ] || { echo "up to date"; exit 0; }'
+    - |
+      if git ls-remote --exit-code origin "refs/heads/sync/$NEW" >/dev/null; then
+        echo "sync/$NEW already proposed"; exit 0
+      fi
+    - git checkout -q -b "sync/$NEW" origin/hearth
+    - |
+      if ! git rebase -q --onto "$NEW" "$OLD"; then
+        STOP=$(git log -1 --format='%h %s' REBASE_HEAD 2>/dev/null || true)
+        FILES=$(git diff --name-only --diff-filter=U | sed 's/^/- /')
+        git rebase --abort
+        TITLE="Upstream $NEW: rebasing hearth conflicts"
+        if [ "$(curl -sf -H "PRIVATE-TOKEN: $SYNC_TOKEN" "$API/issues?state=opened&search=$NEW" | jq length)" = 0 ]; then
+          printf 'Rebasing hearth (on %s) onto %s stops at:\n\n%s\n\nConflicting files:\n%s\n\nResolve by hand (FORK.md), push sync/%s, and open a merge request into hearth.\n' \
+            "$OLD" "$NEW" "$STOP" "$FILES" "$NEW" > /tmp/body
+          curl -sf -H "PRIVATE-TOKEN: $SYNC_TOKEN" --form-string "title=$TITLE" --form-string "description=$(cat /tmp/body)" "$API/issues" >/dev/null
+        fi
+        echo "$TITLE"; exit 1
+      fi
+    - git push -q origin "HEAD:refs/heads/sync/$NEW"
+    - |
+      printf 'Upstream released %s. This is hearth (on %s) rebased onto it.\n\nOur commits:\n%s\n\nThe pipeline test-builds the image. Run **promote** to move hearth here and tag hearth/%s-hearth.0.\n' \
+        "$NEW" "$OLD" "$(git log --format='- %h %s' "$NEW"..HEAD)" "$NEW" > /tmp/body
+      curl -sf -H "PRIVATE-TOKEN: $SYNC_TOKEN" --form-string "source_branch=sync/$NEW" --form-string target_branch=hearth \
+        --form-string "title=Rebase hearth onto upstream $NEW" --form-string "description=$(cat /tmp/body)" \
+        --form-string remove_source_branch=true "$API/merge_requests" | jq -r .web_url
+
+test-build:
+  extends: .docker
+  rules:
+    - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME =~ /^sync\//
+  script:
+    - docker build --target production --build-arg PAPERCLIP_BUILD_COMMIT="$CI_COMMIT_SHA" -t "paperclip-test:$CI_COMMIT_SHORT_SHA" .
+    - docker image rm "paperclip-test:$CI_COMMIT_SHORT_SHA" >/dev/null
+
+promote:
+  extends: .git
+  stage: deploy
+  rules:
+    - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME =~ /^sync\//
+      when: manual
+  script:
+    - NEW="${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME#sync/}"
+    - OLD=$(base_of origin/hearth)
+    # every hearth commit since its old base must be in the rebased branch (by patch id)
+    - MISSING=$(git cherry "$CI_COMMIT_SHA" origin/hearth "$OLD" | grep '^+' || true)
+    - '[ -z "$MISSING" ] || { echo "hearth gained commits missing from sync/$NEW; close this and re-run the sync:"; echo "$MISSING"; exit 1; }'
+    - git push -q --force-with-lease="refs/heads/hearth:$(git rev-parse origin/hearth)" origin "$CI_COMMIT_SHA:refs/heads/hearth"
+    - git tag -a "hearth/$NEW-hearth.0" -m "Hearth build 0 of upstream ${NEW#v}" "$CI_COMMIT_SHA"
+    - git push -q origin "hearth/$NEW-hearth.0"
+    - echo "hearth -> $CI_COMMIT_SHORT_SHA, tagged hearth/$NEW-hearth.0; the release build starts"
